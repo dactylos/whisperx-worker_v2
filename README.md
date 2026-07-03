@@ -9,7 +9,7 @@ A serverless worker that provides high-quality speech transcription with timesta
 Diarization and speaker verification require access to gated models on Hugging Face. You must accept the terms for each model before using those features:
 
 1. [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) — required for diarization
-2. [pyannote/embedding](https://huggingface.co/pyannote/embedding) — required for speaker verification
+2. [pyannote/embedding](https://huggingface.co/pyannote/embedding) — required for speaker verification and per-speaker embeddings
 
 Set your Hugging Face token as the `HF_TOKEN` environment variable on your Runpod endpoint. The worker will use it automatically for diarization and speaker verification — no need to send it with every request.
 
@@ -21,6 +21,8 @@ You can also pass `huggingface_access_token` per-request to override the env var
 - Automatic language detection
 - Word-level timestamp alignment
 - Speaker diarization (optional)
+- Speaker verification against reference samples (optional)
+- Per-speaker voiceprint embeddings for external storage/matching (optional)
 - Base64 audio input (no need to host files)
 - Highly parallelized batch processing
 - Voice activity detection with configurable parameters
@@ -45,7 +47,9 @@ You can also pass `huggingface_access_token` per-request to override the env var
 | `min_speakers` | int | No | `null` | Minimum number of speakers (only applicable if diarization is enabled) |
 | `max_speakers` | int | No | `null` | Maximum number of speakers (only applicable if diarization is enabled) |
 | `debug` | bool | No | `false` | Whether to print compute/inference times and memory usage information |
-| `speaker_samples` | list | No | `[]` | List of speaker sample objects for speaker diarization |
+| `speaker_samples` | list | No | `[]` | List of `{name, url}` reference-audio objects, used when `speaker_verification` is enabled |
+| `speaker_verification` | bool | No | `false` | Match diarized speakers against the reference audio in `speaker_samples` and relabel segments with the closest match |
+| `include_embeddings` | bool | No | `false` | Return one L2-normalized voiceprint centroid per diarized speaker (requires `diarization: true`). See [With Speaker Embeddings](#with-speaker-embeddings) |
 
 ## Usage Examples
 
@@ -114,8 +118,12 @@ Note: Runpod payload limits apply (20 MB for `/runsync`, 10 MB for `/run`). Comp
   }
 }
 ```
-### Full Configuration with Speaker Verification. There is no limit to the number of voice you can upload,  but precision maybe be reduced over a certain threshold
+### Full Configuration with Speaker Verification
+
+There is no limit to the number of voices you can upload, but precision may be reduced over a certain threshold.
+
 ```json
+{
   "input": {
     "audio_file": "https://example.com/audio/sample.mp3",
     "language": "en",
@@ -141,10 +149,27 @@ Note: Runpod payload limits apply (20 MB for `/runsync`, 10 MB for `/run`). Comp
         "name": "Speaker3",
         "url": "https://example.com/speaker3.wav"
       }
-      ...
     ]
   }
 }
+```
+
+### Per-Speaker Voiceprint Embeddings
+
+Set `include_embeddings: true` (together with `diarization: true`) to get one averaged, L2-normalized embedding vector per diarized speaker. Unlike `speaker_verification`, this does **not** match against reference audio — it returns the raw voiceprints so you can store and match them yourself over time (e.g. to recognise recurring speakers across jobs without re-supplying samples on every request).
+
+```json
+{
+  "input": {
+    "audio_file": "https://github.com/runpod-workers/sample-inputs/raw/main/audio/gettysburg.wav",
+    "diarization": true,
+    "include_embeddings": true
+  }
+}
+```
+
+If `include_embeddings` is requested without `diarization: true`, it is skipped and a `warning` is returned in the response.
+
 ## Output Format
 
 The service returns a JSON object structured as follows:
@@ -217,6 +242,31 @@ The service returns a JSON object structured as follows:
   "speakers": {
     "SPEAKER_01": {"name": "Speaker 1", "time": 2.5},
     "SPEAKER_02": {"name": "Speaker 2", "time": 2.5}
+  }
+}
+```
+
+### With Speaker Embeddings
+
+When `include_embeddings: true` (and `diarization: true`), the response adds a `speaker_embeddings` object keyed by diarization label. Each entry is that speaker's averaged, L2-normalized voiceprint — the mean of its per-segment `pyannote/embedding` vectors — plus the total speech duration used to compute it. A label with no successfully embedded segments is omitted.
+
+```json
+{
+  "segments": [ ... ],
+  "detected_language": "en",
+  "speaker_embeddings": {
+    "SPEAKER_00": {
+      "embedding": [0.0123, -0.0456, "..."],
+      "dimension": 512,
+      "model": "pyannote/embedding",
+      "speech_seconds": 42.13
+    },
+    "SPEAKER_01": {
+      "embedding": [-0.0079, 0.0210, "..."],
+      "dimension": 512,
+      "model": "pyannote/embedding",
+      "speech_seconds": 17.98
+    }
   }
 }
 ```

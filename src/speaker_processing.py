@@ -405,6 +405,69 @@ def identify_speakers_on_segments(
     return segments
 
 
+def compute_speaker_centroids(segments: list[dict], audio_path: str) -> dict:
+    """
+    Embed every diarized segment and average them into one L2-normalized
+    centroid per diarization label (SPEAKER_00, …). Unlike
+    identify_speakers_on_segments(), this doesn't match against enrolled
+    profiles — it just hands back the raw per-speaker vectors so a caller can
+    store/match them itself (e.g. to learn voiceprints over time instead of
+    re-verifying against fixed samples on every request).
+
+    Returns {label: {"embedding": [...], "dimension": int, "model": str,
+    "speech_seconds": float}}. Segments with no usable audio are skipped;
+    a label with no successfully embedded segments is omitted.
+    """
+    by_label: dict[str, list[np.ndarray]] = defaultdict(list)
+    speech_seconds: dict[str, float] = defaultdict(float)
+
+    for seg in segments:
+        label = seg.get("speaker")
+        if not label:
+            continue
+
+        start, end = seg["start"], seg["end"]
+        duration = end - start
+        if duration <= 0:
+            continue
+
+        try:
+            wav, sr = librosa.load(audio_path, sr=16000, mono=True, offset=start, duration=duration)
+        except Exception as e:
+            logger.error(f"compute_speaker_centroids: could not load [{start:.2f}-{end:.2f}]: {e}", exc_info=True)
+            continue
+        if wav.size == 0:
+            continue
+
+        try:
+            emb = embed_waveform(wav, sr)
+        except Exception as e:
+            logger.error(f"compute_speaker_centroids: embedding failed for '{label}': {e}", exc_info=True)
+            continue
+
+        by_label[label].append(emb)
+        speech_seconds[label] += duration
+
+    centroids = {}
+    for label, embeddings in by_label.items():
+        dims = {emb.shape[0] for emb in embeddings}
+        if len(dims) != 1:
+            logger.warning(f"compute_speaker_centroids: inconsistent embedding dims for '{label}': {dims}, skipping.")
+            continue
+
+        mean_emb = np.vstack(embeddings).mean(axis=0)
+        centroid = mean_emb / np.linalg.norm(mean_emb)
+
+        centroids[label] = {
+            "embedding": centroid.astype(np.float32).tolist(),
+            "dimension": int(centroid.shape[0]),
+            "model": "pyannote/embedding",
+            "speech_seconds": round(speech_seconds[label], 3),
+        }
+
+    return centroids
+
+
 def relabel_speakers_by_avg_similarity(segments: list[dict]) -> list[dict]:
     """
     For each original diarized speaker label, assign the most likely speaker_id

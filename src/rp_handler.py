@@ -19,6 +19,7 @@ from speaker_profiles import load_embeddings, relabel
 from speaker_processing import (
     process_diarized_output, enroll_profiles, identify_speakers_on_segments,
     load_known_speakers_from_samples, identify_speaker, relabel_speakers_by_avg_similarity,
+    compute_speaker_centroids,
 )
 
 # ---------------------------------------------------------------------------
@@ -222,7 +223,27 @@ def run(job):
     else:
         logger.info("No enrolled embeddings available; skipping speaker identification.")
 
-    # 4-Cleanup and return output_dict normally
+    # 5) per-speaker voiceprint centroids (optional) — raw embeddings for the
+    # caller to store/match itself, independent of speaker_verification above.
+    if job_input.get("include_embeddings"):
+        if not predict_input["diarization"]:
+            output_dict["warning"] = (output_dict.get("warning", "") + " "
+                + "include_embeddings requires diarization=true; skipped.").strip()
+            logger.info("include_embeddings requested without diarization; skipping.")
+        else:
+            try:
+                output_dict["speaker_embeddings"] = compute_speaker_centroids(
+                    segments=output_dict["segments"],
+                    audio_path=audio_file_path,
+                )
+                logger.info(
+                    f"Computed {len(output_dict['speaker_embeddings'])} speaker centroid(s)."
+                )
+            except Exception as e:
+                logger.error("Speaker embedding computation failed", exc_info=True)
+                output_dict["warning"] = f"Speaker embeddings skipped: {e}"
+
+    # 6-Cleanup and return output_dict normally
     cleanup_worker_state(job_id)
 
     return output_dict
